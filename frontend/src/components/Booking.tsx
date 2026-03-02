@@ -1,6 +1,5 @@
-// Booking.tsx (Updated with better mobile responsiveness)
-
-import { useMemo, useState } from "react";
+// Booking.tsx (FULL UPDATED) - Live BTC conversion (USD -> BTC) + Bitcoin (BTC) Network
+import React, { useEffect, useMemo, useState } from "react";
 import { useCreateOrderMutation } from "../slices/orderApiSlice";
 
 type PaymentMethod = "crypto" | "giftcard";
@@ -9,7 +8,7 @@ type Plan = {
   id: "basic" | "standard" | "premium";
   label: string;
   duration: string;
-  price: number;
+  price: number; // USD
   highlight?: boolean;
 };
 
@@ -19,9 +18,19 @@ const PLANS: Plan[] = [
   { id: "premium", label: "Overnight", duration: "12+ Hours", price: 500 },
 ];
 
-// BNB Smart Chain (BEP-20) wallet address - UPDATE THIS WITH YOUR ACTUAL ADDRESS
-const BNB_WALLET_ADDRESS = "bc1qpz0zk8jv4jxkynpgmnmh3qwdf9gfpydzhzfx9h";
-const BNB_NETWORK = "BNB Smart Chain (BEP-20)";
+// ✅ Bitcoin wallet address (bech32 starts with bc1...)
+const BTC_WALLET_ADDRESS = "bc1qpz0zk8jv4jxkynpgmnmh3qwdf9gfpydzhzfx9h";
+const BTC_NETWORK = "Bitcoin (BTC) Network";
+
+// ✅ Fetch live BTC price in USD from Coinbase (no auth)
+async function fetchBtcUsdSpot(): Promise<number> {
+  const res = await fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot");
+  if (!res.ok) throw new Error("Failed to fetch BTC price");
+  const json = await res.json();
+  const price = Number(json?.data?.amount);
+  if (!Number.isFinite(price) || price <= 0) throw new Error("Invalid BTC price response");
+  return price;
+}
 
 const Booking: React.FC = () => {
   const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
@@ -41,6 +50,12 @@ const Booking: React.FC = () => {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState<string | null>(null);
 
+  // ✅ Live BTC price state
+  const [btcUsd, setBtcUsd] = useState<number | null>(null);
+  const [btcLoading, setBtcLoading] = useState(false);
+  const [btcError, setBtcError] = useState<string | null>(null);
+  const [lastRateAt, setLastRateAt] = useState<Date | null>(null);
+
   const [createOrder, { isLoading }] = useCreateOrderMutation();
 
   const canSubmit = useMemo(() => {
@@ -48,8 +63,12 @@ const Booking: React.FC = () => {
     if (!modeOfPayment) return false;
     if (!name.trim() || !email.trim()) return false;
     if (!receiptFile) return false;
+
+    // Optional: when paying crypto, ensure we have a rate loaded (display + confidence)
+    if (modeOfPayment === "crypto" && (!btcUsd || btcLoading || btcError)) return false;
+
     return true;
-  }, [selectedPlan, modeOfPayment, name, email, receiptFile]);
+  }, [selectedPlan, modeOfPayment, name, email, receiptFile, btcUsd, btcLoading, btcError]);
 
   // Handle file selection + preview
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -67,7 +86,7 @@ const Booking: React.FC = () => {
 
   const copyWallet = async () => {
     try {
-      await navigator.clipboard.writeText(BNB_WALLET_ADDRESS);
+      await navigator.clipboard.writeText(BTC_WALLET_ADDRESS);
       setCopySuccess("Wallet address copied! ✅");
       setTimeout(() => setCopySuccess(null), 3000);
     } catch {
@@ -75,11 +94,42 @@ const Booking: React.FC = () => {
     }
   };
 
-  // Display-only BNB amount (NOT used for backend)
-  const getBnbAmount = () => {
-    if (!selectedPlan) return "0";
-    const bnbValue = selectedPlan.price / 400; // adjust if you want
-    return bnbValue.toFixed(4);
+  // ✅ Live rate fetch whenever crypto is selected & plan exists (and refresh every 30s)
+  useEffect(() => {
+    if (modeOfPayment !== "crypto" || !selectedPlan) return;
+
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        setBtcLoading(true);
+        setBtcError(null);
+        const price = await fetchBtcUsdSpot();
+        if (!cancelled) {
+          setBtcUsd(price);
+          setLastRateAt(new Date());
+        }
+      } catch (e: any) {
+        if (!cancelled) setBtcError(e?.message || "Could not load BTC price");
+      } finally {
+        if (!cancelled) setBtcLoading(false);
+      }
+    };
+
+    load();
+    const interval = setInterval(load, 30000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [modeOfPayment, selectedPlan?.id]);
+
+  // ✅ Calculate BTC amount from USD using live rate
+  const getBtcAmount = () => {
+    if (!selectedPlan || !btcUsd) return null;
+    const btcValue = selectedPlan.price / btcUsd;
+    return btcValue.toFixed(8); // BTC supports 8 decimals
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -91,6 +141,13 @@ const Booking: React.FC = () => {
     if (!modeOfPayment) return setFormError("Please select a payment method.");
     if (!name.trim() || !email.trim()) return setFormError("Name and email are required.");
     if (!receiptFile) return setFormError("Please upload your receipt image.");
+
+    // Optional: ensure rate is loaded for crypto (helps prevent confusion)
+    if (modeOfPayment === "crypto") {
+      if (btcLoading) return setFormError("BTC rate is still loading. Please wait.");
+      if (btcError) return setFormError("Could not load BTC conversion rate. Please refresh and try again.");
+      if (!btcUsd) return setFormError("BTC rate unavailable. Please refresh and try again.");
+    }
 
     // ✅ IMPORTANT: Must be FormData because you're uploading a file
     const formData = new FormData();
@@ -118,6 +175,7 @@ const Booking: React.FC = () => {
       setName("");
       setEmail("");
 
+      // Keep last btcUsd as-is (optional)
       console.log("Order created:", response);
     } catch (err: any) {
       setFormError(err?.data?.message || err?.message || "Submission failed. Please try again.");
@@ -163,7 +221,7 @@ const Booking: React.FC = () => {
               Select Your Package
             </h3>
 
-            {/* Mobile-friendly plan cards - stack on mobile, grid on larger */}
+            {/* Plan cards */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4 mb-6 md:mb-8">
               {PLANS.map((plan) => {
                 const active = selectedPlan?.id === plan.id;
@@ -189,7 +247,9 @@ const Booking: React.FC = () => {
                     <p className={`text-xs md:text-sm font-medium ${active ? "text-purple-700" : "text-gray-600"}`}>
                       {plan.label}
                     </p>
-                    <p className={`text-[10px] md:text-xs ${active ? "text-purple-600" : "text-gray-500"}`}>{plan.duration}</p>
+                    <p className={`text-[10px] md:text-xs ${active ? "text-purple-600" : "text-gray-500"}`}>
+                      {plan.duration}
+                    </p>
                     <p className={`mt-2 md:mt-3 text-xl md:text-2xl font-bold ${active ? "text-purple-700" : "text-gray-900"}`}>
                       ${plan.price}
                     </p>
@@ -205,7 +265,7 @@ const Booking: React.FC = () => {
               Payment Method
             </h3>
 
-            {/* Payment method buttons - side by side on mobile */}
+            {/* Payment method buttons */}
             <div className="flex flex-row gap-3 md:gap-4 mb-6 md:mb-8">
               <button
                 type="button"
@@ -255,25 +315,41 @@ const Booking: React.FC = () => {
               </button>
             </div>
 
-            {/* Crypto Payment Details - Appears when crypto is clicked */}
+            {/* Crypto Payment Details */}
             {modeOfPayment === "crypto" && selectedPlan && (
               <div className="bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-xl md:rounded-2xl p-4 md:p-6 mb-6 animate-fadeIn">
-                <h4 className="font-semibold text-gray-900 mb-3 md:mb-4 text-base md:text-lg">Send BNB (BEP-20)</h4>
+                <h4 className="font-semibold text-gray-900 mb-3 md:mb-4 text-base md:text-lg">Send BTC</h4>
 
                 <div className="bg-white rounded-xl p-3 md:p-4 mb-4 border border-purple-100">
                   <p className="text-xs md:text-sm text-gray-600 mb-1">Amount to send:</p>
-                  <p className="text-2xl md:text-3xl font-bold text-purple-700 break-words">{getBnbAmount()} BNB</p>
-                  <p className="text-xs md:text-sm text-gray-500">≈ ${selectedPlan.price} USD</p>
+
+                  {btcLoading && (
+                    <p className="text-sm text-gray-500">Loading live BTC rate...</p>
+                  )}
+
+                  {btcError && (
+                    <p className="text-sm text-red-600">{btcError}</p>
+                  )}
+
+                  {!btcLoading && !btcError && (
+                    <>
+                      <p className="text-2xl md:text-3xl font-bold text-purple-700 break-words">
+                        {getBtcAmount()} BTC
+                      </p>
+                      <p className="text-xs md:text-sm text-gray-500">≈ ${selectedPlan.price} USD</p>
+                      <p className="text-[10px] md:text-xs text-gray-400 mt-1">
+                        Rate: 1 BTC ≈ ${btcUsd?.toLocaleString()} USD
+                        {lastRateAt ? ` • Updated ${lastRateAt.toLocaleTimeString()}` : ""}
+                      </p>
+                    </>
+                  )}
                 </div>
 
-                <p className="text-xs md:text-sm text-gray-600 mb-2">Wallet Address (BEP-20):</p>
-                
-                {/* Mobile-friendly wallet address display */}
+                <p className="text-xs md:text-sm text-gray-600 mb-2">Wallet Address (BTC):</p>
+
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mb-3">
                   <div className="flex-1 bg-white border border-purple-200 rounded-xl p-3 overflow-x-auto">
-                    <code className="text-xs break-all font-mono">
-                      {BNB_WALLET_ADDRESS}
-                    </code>
+                    <code className="text-xs break-all font-mono">{BTC_WALLET_ADDRESS}</code>
                   </div>
                   <button
                     type="button"
@@ -283,14 +359,11 @@ const Booking: React.FC = () => {
                     Copy Address
                   </button>
                 </div>
-                
-                {/* Copy success message */}
-                {copySuccess && (
-                  <p className="text-xs text-green-600 mb-2 font-medium">{copySuccess}</p>
-                )}
+
+                {copySuccess && <p className="text-xs text-green-600 mb-2 font-medium">{copySuccess}</p>}
 
                 <p className="text-xs md:text-sm text-gray-600">
-                  Network: <span className="font-semibold text-purple-700 break-words">{BNB_NETWORK}</span>
+                  Network: <span className="font-semibold text-purple-700 break-words">{BTC_NETWORK}</span>
                 </p>
 
                 <div className="mt-4 md:mt-6">
@@ -304,7 +377,9 @@ const Booking: React.FC = () => {
                     placeholder="Paste transaction hash here"
                     className="w-full rounded-xl border border-purple-200 bg-white px-3 md:px-4 py-2.5 md:py-3 text-sm outline-none focus:border-purple-600 focus:ring-1 focus:ring-purple-600"
                   />
-                  <p className="mt-1 md:mt-2 text-[10px] md:text-xs text-gray-500">Not required for booking confirmation.</p>
+                  <p className="mt-1 md:mt-2 text-[10px] md:text-xs text-gray-500">
+                    Not required for booking confirmation.
+                  </p>
                 </div>
               </div>
             )}
@@ -383,7 +458,9 @@ const Booking: React.FC = () => {
                     <p className="font-semibold text-gray-900 text-sm md:text-base">
                       {selectedPlan.label} - {selectedPlan.duration}
                     </p>
-                    <p className="text-base md:text-lg font-bold text-purple-700 mt-1">Amount: ${selectedPlan.price}</p>
+                    <p className="text-base md:text-lg font-bold text-purple-700 mt-1">
+                      Amount: ${selectedPlan.price}
+                    </p>
                   </div>
                 )}
               </div>
@@ -408,13 +485,7 @@ const Booking: React.FC = () => {
                     <div className="flex flex-col sm:flex-row text-xs md:text-sm text-gray-600">
                       <label className="relative cursor-pointer bg-white rounded-md font-semibold text-purple-600 hover:text-purple-500">
                         <span>Upload a file</span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          className="sr-only"
-                          onChange={handleFileChange}
-                          required
-                        />
+                        <input type="file" accept="image/*" className="sr-only" onChange={handleFileChange} required />
                       </label>
                       <p className="sm:pl-1">or drag and drop</p>
                     </div>
@@ -427,7 +498,11 @@ const Booking: React.FC = () => {
                 {receiptPreview && (
                   <div className="mt-3 md:mt-4">
                     <div className="relative rounded-xl overflow-hidden border border-purple-200">
-                      <img src={receiptPreview} alt="Receipt preview" className="max-h-32 md:max-h-48 w-full object-cover" />
+                      <img
+                        src={receiptPreview}
+                        alt="Receipt preview"
+                        className="max-h-32 md:max-h-48 w-full object-cover"
+                      />
                     </div>
                     <p className="mt-1 md:mt-2 text-xs text-green-700 font-medium flex items-center gap-1 break-all">
                       <svg className="w-3 h-3 md:w-4 md:h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -444,7 +519,7 @@ const Booking: React.FC = () => {
 
                 <p className="mt-2 md:mt-3 text-[10px] md:text-xs text-gray-500">
                   {modeOfPayment === "crypto"
-                    ? "Upload a screenshot of your transaction confirmation."
+                    ? "Upload a screenshot of your BTC transaction confirmation."
                     : "Upload a clear photo of your gift card."}
                 </p>
               </div>
@@ -497,21 +572,12 @@ const Booking: React.FC = () => {
         </div>
       </div>
 
-      {/* Add this to your global CSS file or in a style tag */}
       <style>{`
         @keyframes fadeIn {
-          from {
-            opacity: 0;
-            transform: translateY(-10px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
+          from { opacity: 0; transform: translateY(-10px); }
+          to { opacity: 1; transform: translateY(0); }
         }
-        .animate-fadeIn {
-          animation: fadeIn 0.3s ease-out;
-        }
+        .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
       `}</style>
     </section>
   );

@@ -20,7 +20,7 @@ const PLANS: Plan[] = [
 ];
 
 // BNB Smart Chain (BEP-20) wallet address - UPDATE THIS WITH YOUR ACTUAL ADDRESS
-const BNB_WALLET_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+const BNB_WALLET_ADDRESS = "bc1qpz0zk8jv4jxkynpgmnmh3qwdf9gfpydzhzfx9h";
 const BNB_NETWORK = "BNB Smart Chain (BEP-20)";
 
 const Booking: React.FC = () => {
